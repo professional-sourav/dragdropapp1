@@ -1,15 +1,28 @@
 "use client";
 
-import { Task } from "@/types/tasks";
+import { useMemo } from "react";
+import { useDroppable } from "@dnd-kit/core";
+import { Task, TaskStatus } from "@/types/tasks";
 import { TaskCard } from "./TaskCard";
 
 interface TaskColumnProps {
+  id: TaskStatus;
   title: string;
   tasks: Task[];
   onAddTask: () => void;
+  onEditTask?: (task: Task) => void;
+  onDeleteTask?: (id: string) => void;
 }
 
-export function TaskColumn({ title, tasks, onAddTask }: TaskColumnProps) {
+export function TaskColumn({ id, title, tasks, onAddTask, onEditTask, onDeleteTask }: TaskColumnProps) {
+  const { setNodeRef, isOver } = useDroppable({ id });
+
+  const containerClass = useMemo(() => {
+    const base = "flex-1 rounded-lg p-3 space-y-3 overflow-y-auto";
+    const bg = isOver ? "bg-blue-50 ring-2 ring-blue-200" : "bg-gray-50";
+    return `${base} ${bg}`;
+  }, [isOver]);
+
   return (
     <div className="flex flex-col h-full gap-4">
       <div className="flex items-center justify-between">
@@ -40,13 +53,15 @@ export function TaskColumn({ title, tasks, onAddTask }: TaskColumnProps) {
         </button>
       </div>
 
-      <div className="flex-1 bg-gray-50 rounded-lg p-3 space-y-3 overflow-y-auto">
+      <div ref={setNodeRef} className={containerClass} data-column-id={id}>
         {tasks.length === 0 ? (
           <div className="flex items-center justify-center h-32 text-gray-400">
             <p className="text-sm">No tasks yet</p>
           </div>
         ) : (
-          tasks.map((task) => <TaskCard key={task.id} task={task} />)
+          tasks.map((task) => (
+            <TaskCard key={task.id} task={task} onEdit={onEditTask} onDelete={onDeleteTask} />
+          ))
         )}
       </div>
     </div>
