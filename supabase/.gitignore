@@ -1,0 +1,4 @@
+# Local Supabase setup and secrets
+.env.local
+.env.*.local
+postgres/

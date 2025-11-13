@@ -5,6 +5,11 @@ import { DndContext, DragEndEvent } from "@dnd-kit/core";
 import { Task, TaskStatus, TaskPriority } from "@/types/tasks";
 import { TaskColumn } from "./TaskColumn";
 import { AddTaskModal } from "./AddTaskModal";
+import { FiltersBar } from "./FiltersBar";
+import ExportImport from "./ExportImport";
+import { loadTasksFromLocal, saveTasksToLocal, clearTasksLocal } from "@/utils/localStorage";
+import { useSyncQueue } from "@/hooks/useSyncQueue";
+import SyncIndicator from "./SyncIndicator";
 
 interface KanbanBoardProps {
   initialTasks: Task[];
@@ -17,10 +22,69 @@ export function KanbanBoard({ initialTasks }: KanbanBoardProps) {
   // Prevent hydration mismatch: only render interactive components after mount
   useEffect(() => {
     setIsMounted(true);
+
+    // hydrate tasks from localStorage if present
+    try {
+      const saved = loadTasksFromLocal();
+      if (saved && Array.isArray(saved)) {
+        const normalized = (saved as any[]).map((t) => ({
+          ...t,
+          createdAt: typeof t.createdAt === "string" ? new Date(t.createdAt) : t.createdAt,
+        })) as Task[];
+        setTasks(normalized);
+      }
+    } catch (e) {
+      // ignore
+    }
   }, []);
+
+  // Persist tasks to localStorage (debounced)
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        saveTasksToLocal(tasks);
+      } catch (e) {
+        // ignore
+      }
+    }, 700);
+
+    return () => clearTimeout(t);
+  }, [tasks]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedColumn, setSelectedColumn] = useState<TaskStatus>("todo");
   const [editingTask, setEditingTask] = useState<Task | null>(null);
+  // Filters
+  const [filterPriority, setFilterPriority] = useState<TaskPriority | 'all' | null>(null);
+  const [filterAssignee, setFilterAssignee] = useState<string | 'all' | null>(null);
+  const [filterStatus, setFilterStatus] = useState<TaskStatus | 'all' | null>(null);
+  const [query, setQuery] = useState<string>('');
+
+  const { enqueue, queueLen, lastSuccess, lastError, isSyncing, start, clearQueue, removeItem, retryItem, queueItems } = useSyncQueue();
+
+  // Import / Export handlers
+  const handleImportTasks = useCallback((imported: Task[], mode: "merge" | "replace") => {
+    const normalized = imported.map((t) => ({
+      ...t,
+      createdAt: typeof t.createdAt === "string" ? new Date(t.createdAt) : t.createdAt,
+    })) as Task[];
+
+    if (mode === "replace") {
+      setTasks(normalized);
+      return;
+    }
+
+    setTasks((prev) => {
+      const map = new Map(prev.map((p) => [p.id, p]));
+      normalized.forEach((n) => map.set(n.id, n));
+      return Array.from(map.values());
+    });
+  }, []);
+
+  const handleClearLocal = useCallback(() => {
+    if (!confirm("Clear local task data and reset to defaults?")) return;
+    clearTasksLocal();
+    setTasks(initialTasks);
+  }, [initialTasks]);
 
   const handleAddTask = useCallback(
     (newTask: {
@@ -41,6 +105,8 @@ export function KanbanBoard({ initialTasks }: KanbanBoardProps) {
       };
 
       setTasks((prev) => [task, ...prev]);
+      // enqueue to sync queue
+      enqueue("POST", "/api/tasks", { ...task, createdAt: task.createdAt.toISOString() });
     },
     []
   );
@@ -56,7 +122,23 @@ export function KanbanBoard({ initialTasks }: KanbanBoardProps) {
   };
 
   const getTasksByStatus = (status: TaskStatus): Task[] => {
-    return tasks.filter((task) => task.status === status);
+    // apply filters + search
+    return tasks.filter((task) => {
+      if (task.status !== status) return false;
+      if (filterStatus && filterStatus !== 'all' && task.status !== filterStatus) return false;
+      if (filterPriority && filterPriority !== 'all' && task.priority !== filterPriority) return false;
+      if (filterAssignee && filterAssignee !== 'all') {
+        if (!task.assignees || !Array.isArray(task.assignees)) return false;
+        if (!task.assignees.includes(filterAssignee)) return false;
+      }
+      if (query && query.trim().length > 0) {
+        const q = query.toLowerCase();
+        const inTitle = task.title.toLowerCase().includes(q);
+        const inDesc = task.description?.toLowerCase().includes(q);
+        if (!inTitle && !inDesc) return false;
+      }
+      return true;
+    });
   };
 
   const columns: { id: TaskStatus; title: string }[] = [
@@ -97,11 +179,14 @@ export function KanbanBoard({ initialTasks }: KanbanBoardProps) {
   }) => {
     setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...updated } : t)));
     setEditingTask(null);
+
+    enqueue("PUT", "/api/tasks", { id, ...updated });
   };
 
   const handleDeleteTask = (id: string) => {
     if (!confirm("Delete task? This action cannot be undone.")) return;
     setTasks((prev) => prev.filter((t) => t.id !== id));
+    enqueue("DELETE", `/api/tasks?id=${encodeURIComponent(id)}`);
   };
 
   // Render skeleton/placeholder on server to prevent hydration mismatch
@@ -117,6 +202,33 @@ export function KanbanBoard({ initialTasks }: KanbanBoardProps) {
 
   return (
     <>
+      <div className="mb-4 flex items-center justify-between">
+        <FiltersBar
+          priority={filterPriority}
+          assignee={filterAssignee}
+          status={filterStatus}
+          query={query}
+          onPriorityChange={(p) => setFilterPriority(p)}
+          onAssigneeChange={(a) => setFilterAssignee(a)}
+          onStatusChange={(s) => setFilterStatus(s)}
+          onQueryChange={(q) => setQuery(q)}
+        />
+
+        <div className="ml-4 flex items-center gap-4">
+          <ExportImport tasks={tasks} onImport={handleImportTasks} onClearLocal={handleClearLocal} />
+          <SyncIndicator
+            queueLen={queueLen}
+            lastSuccess={lastSuccess}
+            lastError={lastError}
+            isSyncing={isSyncing}
+            onRetry={() => start()}
+            onClear={() => clearQueue()}
+            queueItems={queueItems.map((q) => ({ id: q.id, method: q.method, url: q.url, attempts: q.attempts, body: q.body, enqueuedAt: q.enqueuedAt }))}
+            onRetryItem={(id) => retryItem(id)}
+            onRemoveItem={(id) => removeItem(id)}
+          />
+        </div>
+      </div>
       <DndContext onDragEnd={handleDragEnd}>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 h-[calc(100vh-120px)]">
           {columns.map((column) => (
